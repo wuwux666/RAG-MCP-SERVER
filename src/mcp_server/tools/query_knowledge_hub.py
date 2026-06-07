@@ -125,8 +125,6 @@ class QueryKnowledgeHubTool:
         self._reranker = reranker
         self._embedding_client = None
         self._response_builder = response_builder or ResponseBuilder()
-        self._intent_router = None
-        self._llm = None
 
         # Track initialization state
         self._initialized = False
@@ -177,15 +175,6 @@ class QueryKnowledgeHubTool:
 
         if self._reranker is None:
             self._reranker = create_core_reranker(settings=self.settings)
-
-        # === 新增：Intent Router（无状态，永远缓存）===
-        if self._intent_router is None:
-            from src.core.query_engine.intent_router import IntentRouter
-            # 复用同一个 LLM 实例（来自 EmbeddingFactory 旁边的创建逻辑）
-            if self._llm is None:
-                from src.libs.llm.llm_factory import LLMFactory
-                self._llm = LLMFactory.create(self.settings)
-            self._intent_router = IntentRouter(self._llm)
 
         if self._embedding_client is None:
             self._embedding_client = EmbeddingFactory.create(self.settings)
@@ -273,56 +262,7 @@ class QueryKnowledgeHubTool:
         trace.metadata["source"] = "mcp"
 
         try:
-            # ── Intent Routing ────────────────────────────────────────
             import time as _time
-            _route_t0 = _time.monotonic()
-            decision = await asyncio.to_thread(
-                self._intent_router.classify, query
-            )
-            _route_elapsed = (_time.monotonic() - _route_t0) * 1000.0
-            trace.record_stage("intent_routing", {
-                "intent": decision.intent.value,
-                "confidence": decision.confidence,
-                "filters": decision.extracted_filters,
-                "sub_queries": decision.sub_queries,
-                "reasoning": decision.reasoning,
-            }, elapsed_ms=_route_elapsed)
-
-            logger.info(
-                f"Intent routed: {decision.intent.value} "
-                f"(confidence={decision.confidence:.2f}, "
-                f"{_route_elapsed:.0f}ms)"
-            )
-
-            # ── Route based on intent ─────────────────────────────────
-            if decision.intent.value == "chat":
-                trace.metadata["routing"] = "chat_short_circuit"
-                TraceCollector().collect(trace)
-                return self._response_builder.build_chat_response(
-                    query=query,
-                    hint="这是一个通用对话查询，请直接与用户交流。如需检索知识库，请提出具体问题。",
-                )
-
-            # filter 意图: 提取的 metadata 条件注入 hybrid_search filters
-            if decision.intent.value == "filter" and decision.extracted_filters:
-                # 将自然语言提取的 filter 传给后续搜索
-                trace.metadata["routing_filters"] = decision.extracted_filters
-                # 注意: 当前 hybrid_search.search() 的 filters 参数需要同步支持
-                # 暂时合并到 query 中以增强搜索效果
-                filter_context = " ".join(
-                    f"{k}:{v}" for k, v in decision.extracted_filters.items() if v
-                )
-                if filter_context:
-                    query = f"{query}\n[筛选条件: {filter_context}]"
-
-            # compare 意图: 合并子查询结果为一次增强搜索
-            if decision.intent.value == "compare" and decision.sub_queries:
-                # 将子查询拼接成增强查询字符串
-                augmented = "; ".join(decision.sub_queries)
-                query = f"{query}\n[子问题: {augmented}]"
-                trace.metadata["routing_sub_queries"] = decision.sub_queries
-
-
             # Initialize components for collection
             # Run blocking I/O (embedding API, ChromaDB, BM25) in a thread
             # to avoid blocking the async event loop / MCP stdio transport

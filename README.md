@@ -84,7 +84,7 @@ PDF → Load → Chunk → Transform → Dual Encode → Store
                                                     ↓
                                                ChromaDB + BM25
                                                     ↓
-                          Query → IntentRoute → HybridSearch → Rerank → Response
+                          Query → HybridSearch → Rerank → Response
                                                     ↓
                                           Dashboard + Trace 可观测
 ```
@@ -97,7 +97,6 @@ PDF → Load → Chunk → Transform → Dual Encode → Store
 |---|---|
 | **Ingestion Pipeline** | PDF → Markdown → 语义分块 → LLM 精炼/元数据增强 → Dense+Sparse 双路编码 → 存储 |
 | **Hybrid Search** | Dense（语义向量）+ Sparse（BM25 关键词）+ RRF 融合 + 可选 Rerank |
-| **Intent Router** 🆕 | LLM 驱动的查询意图分类（chat/search/filter/compare），闲聊零开销短路 |
 | **MCP Server** | 标准 MCP 协议，暴露 `query_knowledge_hub` 等 3 个 Tool |
 | **Dashboard** | Streamlit 6 页面：概览/数据浏览/摄入管理/摄入追踪/查询追踪/评估面板 |
 | **Evaluation** | Ragas LLM-as-Judge + Custom 评估 + Golden Test Set 回归测试 |
@@ -118,20 +117,7 @@ VectorStoreFactory._PROVIDERS = {chroma, ...}
 → 改一行 YAML 即可切 Provider
 ```
 
-### 2. 查询意图路由器（IntentRouter）
-
-在检索前插入 LLM 零样本分类层，识别 4 种意图并选择最优链路：
-
-| 意图 | 策略 | 效果 |
-|---|---|---|
-| chat | 短路，LLM 直接回答 | 零 Embedding 调用 |
-| search | 正常 HybridSearch + Rerank | 当前逻辑 |
-| filter | LLM 提取 metadata 过滤条件注入检索 | 精准命中 |
-| compare | LLM 拆分 2-3 个子查询合并召回 | 覆盖多角度 |
-
-规则层（高频问候、元问题）命中时 < 1ms，LLM 分类 ~200ms。分类失败自动降级为 search——**用户零感知**。
-
-### 3. 双路检索 + 优雅降级
+### 2. 双路检索 + 优雅降级
 
 - **Dense**：Embedding 语义匹配，解决同义词/跨语言
 - **Sparse**：BM25 关键词匹配，解决专有名词/精确匹配
@@ -140,13 +126,13 @@ VectorStoreFactory._PROVIDERS = {chroma, ...}
 
 每一环都有独立 fallback：Dense 挂了 Sparse 顶上，Rerank 挂了保持原始排序，HybridSearch 挂了返回空列表——**整体不崩**。
 
-### 4. 多模态 Image Captioning
+### 3. 多模态 Image Captioning
 
 PDF 中的图片先提取 → Vision LLM 生成文字描述 → 缝合进 Chunk 文本。复用纯文本 RAG 链路即可实现"搜文字出图"，不需要独立的图片向量索引。
 
-### 5. 全链路白盒可观测
+### 4. 全链路白盒可观测
 
-每次 Ingestion（5 阶段）和 Query（5 阶段 + Intent Routing）的中间状态、耗时、数据全部写入 JSONL Trace。Dashboard 可逐阶段展开查看——chunk 拆分前后的文本对比、Dense/Sparse 各自的检索结果、RRF 融合前后的分数变化。
+每次 Ingestion（5 阶段）和 Query（5 阶段）的中间状态、耗时、数据全部写入 JSONL Trace。Dashboard 可逐阶段展开查看——chunk 拆分前后的文本对比、Dense/Sparse 各自的检索结果、RRF 融合前后的分数变化。
 
 
 
@@ -157,11 +143,11 @@ MODULAR-RAG-MCP-SERVER/
 ├── config/
 │   └── settings.yaml              # 全局配置（LLM/Embedding/VectorStore/Ingestion/Rerank）
 ├── scripts/
-│   ├── query.py                   # CLI 查询脚本（含 IntentRouter）
+│   ├── query.py                   # CLI 查询脚本
 │   ├── ingest.py                  # CLI 摄入脚本
 │   └── evaluate.py                # CLI 评估脚本
 ├── tests/
-│   ├── unit/                      # 单元测试（test_intent_router 等）
+│   ├── unit/                      # 单元测试
 │   ├── integration/               # 集成测试
 │   └── fixtures/                  # 测试数据（golden_test_set.json）
 ├── src/
@@ -170,7 +156,6 @@ MODULAR-RAG-MCP-SERVER/
 │   │   ├── settings.py            # 配置加载与解析
 │   │   ├── trace/                 # Trace 上下文与收集器
 │   │   ├── query_engine/          # 检索引擎
-│   │   │   ├── intent_router.py   # 🆕 查询意图路由器
 │   │   │   ├── hybrid_search.py   # Dense + Sparse + RRF 融合
 │   │   │   ├── dense_retriever.py # 向量检索
 │   │   │   ├── sparse_retriever.py# BM25 检索
@@ -253,16 +238,11 @@ Stage 6: Storage                 ← 3 路并行写入
      6c: Image Storage Index     ← 图片元数据注册
 ```
 
-### 读取链路：Query Pipeline（5 阶段 + IntentRoute）
+### 读取链路：Query Pipeline（5 阶段）
 
 ```
 用户查询: "Azure OpenAI 怎么配置？"
   │
-  ▼
-IntentRouter.classify(query)      ← 🆕 LLM 零样本分类（chat/search/filter/compare）
-  │                                  chat → 短路，LLM 直接回答
-  │                                  filter → 提取 metadata 过滤条件
-  │                                  compare → 拆分子查询
   ▼
 QueryProcessor                    ← jieba 分词 + 关键词提取 + 停用词过滤
   │
@@ -278,16 +258,6 @@ Reranker（可选，默认关闭）         ← Cross-Encoder 或 LLM 精排 →
   │
   ▼
 ResponseBuilder                   ← 格式化结果 + citations + MCP 协议包装
-```
-
-### IntentRouter 决策流程
-
-```
-query → _pre_check(query)         ← 规则层（< 1ms）
-  ├── 命中（问候/元问题）         → chat, confidence=0.99
-  └── 未命中                      → _llm_classify(query)  ← LLM 零样本（~200ms）
-                                       ├── 成功              → 返回意图 + 置信度
-                                       └── 失败              → fallback search
 ```
 
 ---
@@ -368,17 +338,7 @@ MCP Client 调用 query_knowledge_hub
        ├── QueryProcessor                          ← jieba 分词 + 停用词过滤
        └── create_hybrid_search(dense, sparse, processor)
 
-3. 🆕 意图路由（IntentRouter.classify）
-   └── asyncio.to_thread(router.classify, query)
-       ├── 规则预检（_pre_check）→ 问候/元问题 → chat，< 1ms
-       ├── LLM 零样本分类（_llm_classify）→ 结构化 JSON 输出，~200ms
-       └── 路由分支：
-           ├── chat    → 短路，直接返回 build_chat_response()
-           ├── filter  → 提取 metadata 过滤条件，注入 query 上下文
-           ├── compare → 拆分子查询，拼接增强 query
-           └── search  → 不做干预，走原有检索流程
-
-4. 混合搜索（HybridSearch.search）
+3. 混合搜索（HybridSearch.search）
    └── asyncio.to_thread(_perform_search, query, top_k*2)
        ├── Dense Retrieval（并行）
        │   ├── QueryProcessor 分词 + 提取关键词
@@ -391,23 +351,23 @@ MCP Client 调用 query_knowledge_hub
        └── RRF Fusion (k=60)
            └── 合并两个排名列表，按 1/(k+rank) 加权求和，取 top 10
 
-5. 重排序（可选，config.enable_rerank 控制）
+4. 重排序（可选，config.enable_rerank 控制）
    └── asyncio.to_thread(_apply_rerank, query, results, top_k)
        ├── Cross-Encoder 逐对打分（query, chunk_text）→ 精排
        ├── LLM Rerank（备选，按 settings.rerank.provider 切换）
        └── 失败降级：取原始排序的前 top_k 结果
 
-6. 响应构建（ResponseBuilder.build）
+5. 响应构建（ResponseBuilder.build）
    └── 遍历 results → 格式化 Markdown 文本
        ├── 每个 chunk: 分数 + 来源文件 + chunk 索引 + 文本预览
        ├── citations 列表: {title, source_path, chunk_id, score}
        └── 图片 chunk → ImageContent 块
 
-7. Trace 收集
+6. Trace 收集
    └── trace.metadata["final_results"] = [每个结果的关键字段]
    └── TraceCollector().collect(trace) → 写入 logs/traces.jsonl
 
-8. MCP 协议包装
+7. MCP 协议包装
    └── response.to_mcp_content() → 分离 TextContent + ImageContent
    └── types.CallToolResult(content=content_blocks, isError=False)
 ```
@@ -417,7 +377,6 @@ MCP Client 调用 query_knowledge_hub
 | 步骤 | 类/模块 | 文件 |
 |---|---|---|
 | 初始化 | `QueryKnowledgeHubTool._ensure_initialized()` | `src/mcp_server/tools/query_knowledge_hub.py` |
-| 意图路由 | `IntentRouter.classify()` | `src/core/query_engine/intent_router.py` |
 | 混合搜索 | `HybridSearch.search()` | `src/core/query_engine/hybrid_search.py` |
 | 向量检索 | `DenseRetriever.search()` | `src/core/query_engine/dense_retriever.py` |
 | 关键词检索 | `SparseRetriever.search()` | `src/core/query_engine/sparse_retriever.py` |
@@ -518,7 +477,7 @@ MCP Client 调用 get_document_summary
 
 ### 当前实现
 
-`query_knowledge_hub` 采用**全量返回**模式：完整走完 IntentRoute → Search → Rerank 后，一次性返回所有结果。每一步的状态写入 Trace（JSONL），可在 Dashboard 的 Query Traces 页逐阶段展开查看。
+`query_knowledge_hub` 采用**全量返回**模式：完整走完 Search → Rerank 后，一次性返回所有结果。每一步的状态写入 Trace（JSONL），可在 Dashboard 的 Query Traces 页逐阶段展开查看。
 
 ### 流式输出（规划中）
 
@@ -527,12 +486,11 @@ MCP Server stdio transport 基于 asyncio，天然支持流式。计划实现的
 ```
 客户端发起查询
   →
-  ① IntentRoute 完成 → 推送 {"stage": "routing", "intent": "search", "elapsed_ms": 200}
-  ② Dense 检索完成  → 推送 {"stage": "dense", "hits": 20, "elapsed_ms": 350}
-  ③ Sparse 检索完成 → 推送 {"stage": "sparse", "hits": 20, "elapsed_ms": 120}
-  ④ RRF Fusion 完成 → 推送 {"stage": "fusion", "hits": 10, "elapsed_ms": 50}
-  ⑤ Rerank 完成     → 推送 {"stage": "rerank", "hits": 5, "elapsed_ms": 300}
-  ⑥ 最终结果流式返回，每个 chunk 附 citations
+  ① Dense 检索完成  → 推送 {"stage": "dense", "hits": 20, "elapsed_ms": 350}
+  ② Sparse 检索完成 → 推送 {"stage": "sparse", "hits": 20, "elapsed_ms": 120}
+  ③ RRF Fusion 完成 → 推送 {"stage": "fusion", "hits": 10, "elapsed_ms": 50}
+  ④ Rerank 完成     → 推送 {"stage": "rerank", "hits": 5, "elapsed_ms": 300}
+  ⑤ 最终结果流式返回，每个 chunk 附 citations
 ```
 
 MCP 协议支持 `CallToolResult` 返回多个 `TextContent`，每个 chunk 可作为独立的 content block 逐步返回：

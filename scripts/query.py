@@ -166,7 +166,7 @@ def _build_components(settings, collection: str):
 
     return hybrid_search, reranker
 
-from src.libs.llm.base_llm import Message
+
 def _run_query(
     hybrid_search,
     reranker,
@@ -178,34 +178,7 @@ def _run_query(
     trace = TraceContext(trace_type="query")
     trace.metadata["query"] = query[:200]
     trace.metadata["top_k"] = top_k
-    from src.libs.llm.llm_factory import LLMFactory
-    from src.core.query_engine.intent_router import IntentRouter, QueryIntent
-    from src.core.settings import load_settings
 
-    settings = load_settings()
-    llm = LLMFactory.create(settings)
-    router = IntentRouter(llm)
-    decision = router.classify(query)
-
-    print(f"\n[路由] 意图: {decision.intent.value}  置信度: {decision.confidence:.2f}")
-    print(f"[路由] 理由: {decision.reasoning}")
-
-    if decision.intent == QueryIntent.CHAT:
-        # 用 LLM 直接生成回答
-        
-        messages = [
-            Message(role="system", content="你是一个友好的 AI 助手。请用中文简洁回答。"),
-            Message(role="user", content=query),
-        ]
-        response = llm.chat(messages, temperature=0.7)
-        
-        print(f"\n{'='*60}")
-        print(f"💬 {response.content}")
-        print(f"{'='*60}")
-        
-        trace.metadata["routing"] = "chat_short_circuit"
-        TraceCollector().collect(trace)
-        return 0
     try:
         hybrid_result = hybrid_search.search(
             query=query,
@@ -262,21 +235,8 @@ def _run_query(
         print("[INFO] Reranking disabled by settings.")
 
     _print_results(results, top_k=effective_top_k)
-    if results:
-    # 拼接上下文
-        context = "\n\n".join(r.text for r in results[:3])
-        
-        gen_messages = [
-            Message(role="system", content="你是一个知识库助手。请根据提供的资料回答问题。如果资料中找不到答案，请如实说。"),
-            Message(role="user", content=f"资料：\n{context}\n\n问题：{query}"),
-        ]
-        gen_response = llm.chat(gen_messages, temperature=0.0)
-        
-        print(f"\n{'='*60}")
-        print(f"🤖 回答：{gen_response.content}")
-        print(f"{'='*60}")
-        TraceCollector().collect(trace)
-        return 0
+    TraceCollector().collect(trace)
+    return 0
 
 
 def main() -> int:

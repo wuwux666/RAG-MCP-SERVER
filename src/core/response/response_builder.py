@@ -201,26 +201,7 @@ class ResponseBuilder:
             is_empty=False,
             image_contents=image_contents,
         )
-    # response_builder.py
-    def build_chat_response(self, query: str, hint: str) -> MCPToolResponse:
-        """为闲聊意图构建响应——不需要检索结果。"""
-        content = f"## 💬 对话模式\n\n"
-        content += f"查询: **{query}**\n\n"
-        content += f"> {hint}\n\n"
-        content += "您可以直接与 AI 助手对话，无需检索知识库。\n"
-        content += "如需查询知识库，请提出具体的技术问题。\n"
-
-        return MCPToolResponse(
-            content=content,
-            citations=[],
-            metadata={
-                "query": query,
-                "intent": "chat",
-                "routing": "short_circuit",
-            },
-            is_empty=False,
-        )
-
+    
     def _build_empty_response(
         self,
         query: str,
