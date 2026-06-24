@@ -228,13 +228,21 @@ class RagasEvaluator(BaseEvaluator):
             )
         elif provider == "openai":
             llm_client = AsyncOpenAI(api_key=llm_cfg.api_key)
+        elif provider == "deepseek":
+            llm_client = AsyncOpenAI(
+                api_key=llm_cfg.api_key,
+                base_url=getattr(llm_cfg, "base_url", "https://api.deepseek.com"),
+            )
         else:
             raise ValueError(
                 f"Unsupported LLM provider for Ragas: '{provider}'. "
                 "Supported: azure, openai"
             )
 
-        llm = llm_factory(llm_cfg.model, client=llm_client, max_tokens=8192)
+        # deepseek-v4-pro 的 thinking 模式不支持 tool_choice，
+        # Ragas 底层用 instructor 强制 tool_choice → 必须用非思考模型
+        _ragas_model = "deepseek-chat" if provider == "deepseek" else llm_cfg.model
+        llm = llm_factory(_ragas_model, client=llm_client, max_tokens=8192)
 
         # ── Embeddings ──
         emb_cfg = self.settings.embedding

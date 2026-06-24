@@ -105,3 +105,6 @@ traces.jsonl
 .env.*.local
 secrets.yaml
 nonexistent_traces.jsonl/
+
+# Claude Code 项目指南（仅本地）
+CLAUDE.md
