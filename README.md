@@ -12,10 +12,10 @@
 - Windows / macOS / Linux
 
 ### 1. 克隆
-
+```bash
 git clone https://github.com/wuwux666/RAG-MCP-SERVER.git
 cd Modular-RAG-MCP-Server
-
+'''
 ### 2. 配置 settings.yaml
 
 编辑 `config/settings.yaml`，最少需要配 3 项：
