@@ -13,7 +13,7 @@
 
 ### 1. 克隆
 
-git clone <repo-url>
+git clone https://github.com/wuwux666/RAG-MCP-SERVER.git
 cd Modular-RAG-MCP-Server
 
 ### 2. 配置 settings.yaml
