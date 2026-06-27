@@ -37,13 +37,18 @@ logger = logging.getLogger(__name__)
 TOOL_NAME = "query_knowledge_hub"
 TOOL_DESCRIPTION = """Search the knowledge base for relevant documents.
 
-This tool uses hybrid search (semantic + keyword) to find the most relevant 
+This tool uses hybrid search (semantic + keyword) to find the most relevant
 documents matching your query. Results include source citations for reference.
+
+Supports agentic mode for complex multi-hop questions — the tool automatically
+detects question complexity and performs iterative retrieval when needed.
 
 Parameters:
 - query: Your search question or keywords
 - top_k: Maximum number of results (default: 5)
 - collection: Limit search to a specific document collection
+- agentic: "auto" (default) for automatic routing, "off" for traditional search,
+  "on" to force multi-step iterative retrieval
 """
 
 TOOL_INPUT_SCHEMA: Dict[str, Any] = {
@@ -64,6 +69,12 @@ TOOL_INPUT_SCHEMA: Dict[str, Any] = {
             "type": "string",
             "description": "Optional collection name to limit the search scope.",
         },
+        "agentic": {
+            "type": "string",
+            "description": "Agentic mode: 'auto' (smart routing, default), 'off' (traditional single-shot), 'on' (force multi-step).",
+            "enum": ["auto", "off", "on"],
+            "default": "auto",
+        },
     },
     "required": ["query"],
 }
@@ -72,17 +83,21 @@ TOOL_INPUT_SCHEMA: Dict[str, Any] = {
 @dataclass
 class QueryKnowledgeHubConfig:
     """Configuration for query_knowledge_hub tool.
-    
+
     Attributes:
         default_top_k: Default number of results if not specified
         max_top_k: Maximum allowed top_k value
         default_collection: Default collection if not specified
         enable_rerank: Whether to apply reranking
+        agentic_mode: Agentic routing mode ("auto", "off", "on")
+        max_agentic_rounds: Max iterative rounds in agentic mode
     """
     default_top_k: int = 5
     max_top_k: int = 20
     default_collection: str = "default"
     enable_rerank: bool = True
+    agentic_mode: str = "auto"
+    max_agentic_rounds: int = 5
 
 
 class QueryKnowledgeHubTool:
@@ -225,97 +240,105 @@ class QueryKnowledgeHubTool:
         query: str,
         top_k: Optional[int] = None,
         collection: Optional[str] = None,
+        agentic: str = "auto",
     ) -> MCPToolResponse:
         """Execute the query_knowledge_hub tool.
-        
+
         Args:
             query: Search query string.
             top_k: Maximum results to return.
             collection: Target collection name.
-            
+            agentic: Routing mode — "auto" (smart routing), "off" (traditional),
+                     "on" (force multi-step iterative retrieval).
+
         Returns:
             MCPToolResponse with formatted content and citations.
-            
+
         Raises:
             ValueError: If query is empty or invalid.
         """
         # Validate query
         if not query or not query.strip():
             raise ValueError("Query cannot be empty")
-        
+
         # Apply defaults
         effective_top_k = min(
             top_k or self.config.default_top_k,
             self.config.max_top_k
         )
         effective_collection = collection or self.config.default_collection
-        
+
         logger.info(
             f"Executing query_knowledge_hub: query='{query[:50]}...', "
-            f"top_k={effective_top_k}, collection={effective_collection}"
+            f"top_k={effective_top_k}, collection={effective_collection}, "
+            f"agentic={agentic}"
         )
-        
+
         trace = TraceContext(trace_type="query")
         trace.metadata["query"] = query[:200]
         trace.metadata["top_k"] = effective_top_k
         trace.metadata["collection"] = effective_collection
+        trace.metadata["agentic"] = agentic
         trace.metadata["source"] = "mcp"
 
         try:
             import time as _time
             # Initialize components for collection
-            # Run blocking I/O (embedding API, ChromaDB, BM25) in a thread
-            # to avoid blocking the async event loop / MCP stdio transport
             _init_t0 = _time.monotonic()
             await asyncio.to_thread(self._ensure_initialized, effective_collection)
             _init_elapsed = (_time.monotonic() - _init_t0) * 1000.0
             trace.record_stage("initialization", {
                 "collection": effective_collection,
-                "cold_start": _init_elapsed > 500,  # >500ms ≈ cold
+                "cold_start": _init_elapsed > 500,
             }, elapsed_ms=_init_elapsed)
-            
-            # Perform hybrid search (blocking: embedding API + DB queries)
-            results = await asyncio.to_thread(
-                self._perform_search, query, effective_top_k, trace,
-            )
-            
-            # Apply reranking if enabled (may call LLM API)
-            if self.config.enable_rerank and results:
-                results = await asyncio.to_thread(
-                    self._apply_rerank, query, results, effective_top_k, trace,
+
+            # ── Agentic routing ──────────────────────────────────────────
+            should_use_agentic = agentic == "on"
+
+            if agentic == "auto":
+                _t0 = _time.monotonic()
+                should_use_agentic = await asyncio.to_thread(
+                    self._complexity_check, query
                 )
-            
-            # Build response
-            response = self._response_builder.build(
-                results=results,
-                query=query,
-                collection=effective_collection,
-            )
-            
-            # Store final results in trace for dashboard display
-            trace.metadata["final_results"] = [
-                {
-                    "chunk_id": r.chunk_id,
-                    "score": round(r.score, 4),
-                    "text": r.text or "",
-                    "source": r.metadata.get("source_path", r.metadata.get("source", "")),
-                    "title": r.metadata.get("title", ""),
-                }
-                for r in results
-            ]
+                _elapsed = (_time.monotonic() - _t0) * 1000.0
+                trace.record_stage("complexity_check", {
+                    "is_complex": should_use_agentic,
+                }, elapsed_ms=_elapsed)
+                logger.info(
+                    f"Complexity check: complex={should_use_agentic}"
+                    f" ({_elapsed:.0f}ms)"
+                )
+
+            if should_use_agentic:
+                response = await self._agentic_search(
+                    query=query,
+                    top_k=effective_top_k,
+                    collection=effective_collection,
+                    trace=trace,
+                )
+                response.metadata["agentic_routing"] = "agentic"
+            else:
+                response = await self._traditional_search(
+                    query=query,
+                    top_k=effective_top_k,
+                    collection=effective_collection,
+                    trace=trace,
+                )
+                response.metadata["agentic_routing"] = "traditional"
+            # ─────────────────────────────────────────────────────────────
 
             logger.info(
-                f"query_knowledge_hub completed: {len(results)} results, "
+                f"query_knowledge_hub completed: "
+                f"agentic={should_use_agentic}, "
                 f"is_empty={response.is_empty}"
             )
-            
+
             TraceCollector().collect(trace)
             return response
-            
+
         except Exception as e:
             logger.exception(f"query_knowledge_hub failed: {e}")
             TraceCollector().collect(trace)
-            # Return error response
             return self._build_error_response(query, effective_collection, str(e))
     
     def _perform_search(
@@ -428,6 +451,278 @@ class QueryKnowledgeHubTool:
             is_empty=True,
         )
 
+    # ── Agentic routing helpers ──────────────────────────────────────────
+
+    def _get_llm(self):
+        """Get or create an LLM client for complexity check + decomposition.
+
+        Cached per instance to avoid repeated factory calls.
+        """
+        if not hasattr(self, "_llm_client") or self._llm_client is None:
+            from src.libs.llm.llm_factory import LLMFactory
+            self._llm_client = LLMFactory.create(self.settings)
+        return self._llm_client
+
+    def _complexity_check(self, query: str) -> bool:
+        """Quick LLM-based complexity check for routing decisions.
+
+        Returns True if the question is complex (needs multi-hop), False
+        if it's a simple single-shot query. Uses a minimal prompt (~50
+        output tokens) to keep latency and cost low.
+
+        Args:
+            query: User's question.
+
+        Returns:
+            True for complex questions, False for simple ones.
+        """
+        from src.libs.llm.base_llm import Message
+        llm = self._get_llm()
+
+        prompt = (
+            "判断以下问题是简单还是复杂。\n"
+            "简单 = 单一事实查询，一次检索即可回答，如'什么是X'、'怎么配置Y'。\n"
+            "复杂 = 需要对比多个信息源、多步推理、因果分析，如'对比A和B的差异'、"
+            "'为什么X导致Y'、'综合多个来源分析Z'。\n\n"
+            f"问题：{query}\n\n"
+            "只回答一个字：简单 或 复杂。"
+        )
+
+        try:
+            response = llm.chat([
+                Message(role="user", content=prompt),
+            ])
+            result = response.content.strip()
+            is_complex = "复杂" in result
+            logger.info(
+                f"Complexity check: '{query[:60]}...' → "
+                f"'{result[:20]}' → complex={is_complex}"
+            )
+            return is_complex
+        except Exception as e:
+            logger.warning(f"Complexity check LLM call failed: {e}, "
+                           "falling back to traditional search")
+            return False
+
+    async def _traditional_search(
+        self,
+        query: str,
+        top_k: int,
+        collection: str,
+        trace: Any,
+    ) -> MCPToolResponse:
+        """Traditional single-shot hybrid search (existing behavior).
+
+        Args:
+            query: Search query.
+            top_k: Maximum results.
+            collection: Target collection.
+            trace: TraceContext for observability.
+
+        Returns:
+            MCPToolResponse with formatted content and citations.
+        """
+        # Perform hybrid search (blocking: embedding API + DB queries)
+        results = await asyncio.to_thread(
+            self._perform_search, query, top_k * 2, trace,
+        )
+
+        # Apply reranking if enabled (may call LLM API)
+        if self.config.enable_rerank and results:
+            results = await asyncio.to_thread(
+                self._apply_rerank, query, results, top_k, trace,
+            )
+
+        # Build response
+        response = self._response_builder.build(
+            results=results[:top_k],
+            query=query,
+            collection=collection,
+        )
+
+        # Store final results in trace for dashboard display
+        trace.metadata["final_results"] = [
+            {
+                "chunk_id": r.chunk_id,
+                "score": round(r.score, 4),
+                "text": r.text or "",
+                "source": r.metadata.get("source_path", r.metadata.get("source", "")),
+                "title": r.metadata.get("title", ""),
+            }
+            for r in results[:top_k]
+        ]
+
+        return response
+
+    async def _agentic_search(
+        self,
+        query: str,
+        top_k: int,
+        collection: str,
+        trace: Any,
+    ) -> MCPToolResponse:
+        """Multi-hop iterative search for complex questions.
+
+        Decomposes the query, searches each sub-query, evaluates
+        coverage, and optionally performs additional rounds if
+        the LLM determines information is insufficient.
+
+        Limited to ``max_agentic_rounds`` decomposition rounds for
+        latency control. Each round: decompose → parallel search →
+        evaluate coverage → merge.
+
+        Args:
+            query: Complex user question.
+            top_k: Maximum total results.
+            collection: Target collection.
+            trace: TraceContext for observability.
+
+        Returns:
+            MCPToolResponse with merged results and citations.
+        """
+        from src.libs.llm.base_llm import Message
+        llm = self._get_llm()
+        all_results: Dict[str, RetrievalResult] = {}  # chunk_id → result
+        search_history: List[str] = []
+
+        # Round 0: decompose original question
+        decompose_prompt = (
+            "你是一个查询分析专家。将下面的复杂问题分解为 2-4 个独立的检索子问题，"
+            "每个子问题应该简洁、独立，适合在知识库中搜索。\n\n"
+            f"问题：{query}\n\n"
+            "只输出子问题，每行一个，不要编号。"
+        )
+
+        try:
+            decompose_resp = llm.chat([
+                Message(role="user", content=decompose_prompt),
+            ])
+            sub_queries = [
+                q.strip() for q in decompose_resp.content.strip().split("\n")
+                if q.strip() and len(q.strip()) > 2
+            ]
+        except Exception as e:
+            logger.warning(f"Query decomposition failed: {e}, "
+                           "falling back to original query")
+            sub_queries = [query]
+
+        if not sub_queries:
+            sub_queries = [query]
+
+        sub_queries = sub_queries[:4]  # max 4 sub-queries
+        logger.info(f"Agentic search: decomposed into {len(sub_queries)} sub-queries")
+
+        for round_num in range(self.config.max_agentic_rounds):
+            round_queries = sub_queries if round_num == 0 else []
+
+            # If not first round, ask LLM if more searching is needed
+            if round_num > 0:
+                coverage_prompt = (
+                    f"原始问题：{query}\n\n"
+                    f"已检索的信息：\n{_summarize_for_coverage(all_results.values())}\n\n"
+                    "判断：以上信息是否足以完整回答问题?"
+                    "如果足够，回复'足够'。"
+                    "如果不够，给出 1-2 个新的检索子问题(每行一个)。"
+                )
+                try:
+                    coverage_resp = llm.chat([
+                        Message(role="user", content=coverage_prompt),
+                    ])
+                    coverage_text = coverage_resp.content.strip()
+                    if "足够" in coverage_text and "不" not in coverage_text:
+                        logger.info(
+                            f"Agentic search: coverage sufficient after "
+                            f"round {round_num}"
+                        )
+                        break
+                    round_queries = [
+                        q.strip() for q in coverage_text.split("\n")
+                        if q.strip() and len(q.strip()) > 2
+                        and q.strip() not in search_history
+                    ][:2]
+                except Exception as e:
+                    logger.warning(f"Coverage check failed: {e}")
+                    break
+
+            if not round_queries:
+                break
+
+            # Parallel search for this round's sub-queries
+            for sub_q in round_queries:
+                if sub_q in search_history:
+                    continue
+                search_history.append(sub_q)
+
+                try:
+                    results = await asyncio.to_thread(
+                        self._perform_search, sub_q, top_k, trace,
+                    )
+                    for r in results:
+                        if r.chunk_id not in all_results:
+                            all_results[r.chunk_id] = r
+                except Exception as e:
+                    logger.warning(f"Sub-query search failed: '{sub_q}': {e}")
+                    continue
+
+            logger.info(
+                f"Agentic search round {round_num + 1}: "
+                f"{len(round_queries)} sub-queries, "
+                f"{len(all_results)} unique results so far"
+            )
+
+        # Merge and rerank all collected results
+        merged = sorted(
+            all_results.values(),
+            key=lambda r: r.score,
+            reverse=True,
+        )
+
+        # Apply reranking if enabled
+        if self.config.enable_rerank and merged:
+            merged = await asyncio.to_thread(
+                self._apply_rerank, query, merged, top_k, trace,
+            )
+
+        trace.metadata["agentic_rounds"] = round_num + 1
+        trace.metadata["agentic_sub_queries"] = len(search_history)
+
+        # Build response
+        response = self._response_builder.build(
+            results=merged[:top_k],
+            query=query,
+            collection=collection,
+        )
+
+        # Store final results in trace
+        trace.metadata["final_results"] = [
+            {
+                "chunk_id": r.chunk_id,
+                "score": round(r.score, 4),
+                "text": r.text or "",
+                "source": r.metadata.get("source_path", r.metadata.get("source", "")),
+                "title": r.metadata.get("title", ""),
+            }
+            for r in merged[:top_k]
+        ]
+
+        return response
+
+
+def _summarize_for_coverage(
+    results: Any,  # Iterable[RetrievalResult]
+    max_items: int = 6,
+) -> str:
+    """Build a short summary of retrieved results for coverage check."""
+    items = list(results)[:max_items]
+    lines = []
+    for i, r in enumerate(items, 1):
+        text = (r.text or "")[:120].replace("\n", " ")
+        source = r.metadata.get("source_path", r.metadata.get("source", "?"))
+        lines.append(f"[{i}] {text}... (来源: {source})")
+    if len(list(results)) > max_items:
+        lines.append(f"... 还有 {len(list(results)) - max_items} 条结果")
+    return "\n".join(lines) if lines else "(暂无检索结果)"
+
 
 # Module-level tool instance (lazy-initialized)
 _tool_instance: Optional[QueryKnowledgeHubTool] = None
@@ -452,20 +747,23 @@ async def query_knowledge_hub_handler(
     query: str,
     top_k: int = 5,
     collection: Optional[str] = None,
+    agentic: str = "auto",
 ) -> types.CallToolResult:
     """Handler function for MCP tool registration.
-    
+
     This function is registered with the ProtocolHandler and called
     when the MCP client invokes the query_knowledge_hub tool.
-    
+
     Supports multimodal responses - if search results contain images,
     the response will include ImageContent blocks alongside TextContent.
-    
+
     Args:
         query: Search query string.
         top_k: Maximum number of results.
         collection: Optional collection name.
-        
+        agentic: Routing mode — "auto" (smart routing), "off" (traditional),
+                 "on" (force multi-step).
+
     Returns:
         MCP CallToolResult with content blocks (text and optionally images).
     """
@@ -476,6 +774,7 @@ async def query_knowledge_hub_handler(
             query=query,
             top_k=top_k,
             collection=collection,
+            agentic=agentic,
         )
         
         # Use to_mcp_content() which handles multimodal (text + images)

@@ -10,7 +10,9 @@
       "Bash(pytest tests/unit/ -v -m \"not llm and not slow\")",
       "Bash(pytest tests/unit/test_trace_context.py tests/unit/test_trace_service.py -v)",
       "Bash(bash \"C:\\\\Users\\\\34290\\\\.claude\\\\plugins\\\\cache\\\\superpowers-dev\\\\superpowers\\\\6.0.3\\\\skills\\\\subagent-driven-development\\\\scripts\\\\review-package\" 8cf9422 HEAD)",
-      "Bash(pytest tests/unit/agentic/test_tool_registry.py -v)"
+      "Bash(pytest tests/unit/agentic/test_tool_registry.py -v)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/mcp_server/tools/query_knowledge_hub.py'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
+      "Bash(python -c \"from src.mcp_server.tools.query_knowledge_hub import TOOL_NAME, TOOL_INPUT_SCHEMA; print\\('Import OK'\\); print\\('agentic in schema:', 'agentic' in TOOL_INPUT_SCHEMA['properties']\\)\")"
     ]
   }
 }
