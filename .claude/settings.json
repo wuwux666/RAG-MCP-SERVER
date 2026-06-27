@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/unit/agentic/test_react_loop.py -v)"
+    ]
+  }
+}

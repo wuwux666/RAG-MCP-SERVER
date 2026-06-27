@@ -122,25 +122,27 @@ class ReActLoop:
             current_key = f"{parsed_action.name}:{_params_key(parsed_action.params)}"
             if current_key == last_action_key:
                 repeat_count += 1
-                if repeat_count >= 2:
-                    observation_text = (
-                        f"{observation.text}\n\n"
-                        "[警告] 连续 2 次相同调用，请换策略或输出 Final Answer。"
-                    )
             else:
                 repeat_count = 0
             last_action_key = current_key
 
+            obs_content = observation.text
+            if repeat_count >= 2:
+                obs_content = (
+                    f"{obs_content}\n\n"
+                    "[警告] 连续 2 次相同调用，请换策略或输出 Final Answer。"
+                )
+
             # 7. Append to messages
             messages.append(Message(role="assistant", content=response.content))
-            messages.append(Message(role="user", content=_format_obs(observation.text)))
+            messages.append(Message(role="user", content=_format_obs(obs_content)))
 
             # 8. Record trace
             self._trace.append(RoundTrace(
                 round_number=round_num,
                 thought=parsed.thought or "",
                 action=action_text,
-                observation=observation.text,
+                observation=obs_content,
             ))
 
             # 9. Trim context
