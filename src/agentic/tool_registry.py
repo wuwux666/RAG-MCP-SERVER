@@ -1,0 +1,175 @@
+"""Tool definitions, action parsing, and execution delegation for ReAct agent.
+
+Maps LLM-generated Action strings to MCP tool calls via MCPClient.
+3 tools: query_knowledge_hub, list_collections, get_document_summary.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+import json
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+from src.core.types import RetrievalResult
+
+if TYPE_CHECKING:
+    from src.agentic.mcp_client import MCPClient, ToolResult
+
+logger = logging.getLogger(__name__)
+
+_TOOL_DEFS: Dict[str, Dict[str, Any]] = {
+    "query_knowledge_hub": {
+        "description": "在知识库中搜索相关文档。返回文档片段及来源引用。",
+    },
+    "list_collections": {
+        "description": "列出所有可用的文档集合。",
+    },
+    "get_document_summary": {
+        "description": "获取某个文档的元数据和内容摘要。",
+    },
+}
+
+
+@dataclass
+class ParsedAction:
+    """A parsed tool invocation from LLM output."""
+
+    name: str
+    params: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Observation:
+    """Observation returned to the LLM after a tool call."""
+
+    text: str
+    is_error: bool = False
+    results: List[RetrievalResult] = field(default_factory=list)
+
+
+class ToolRegistry:
+    """Manages tool definitions and executes actions via MCPClient."""
+
+    def __init__(self, mcp_client: MCPClient) -> None:
+        self._mcp_client = mcp_client
+
+    def parse_action(self, action_text: str) -> ParsedAction:
+        """Parse LLM-generated action string into a ParsedAction.
+
+        Args:
+            action_text: The action portion of LLM output
+                         e.g. 'tool_name(key="value", key2=123)'.
+
+        Returns:
+            ParsedAction with tool name and parameters.
+        """
+        match = re.match(r"(\w+)\((.*)\)", action_text.strip(), re.DOTALL)
+        if not match:
+            return ParsedAction(name=action_text.strip(), params={})
+
+        name = match.group(1).strip()
+        params_str = match.group(2).strip()
+        params = self._parse_params(params_str)
+
+        return ParsedAction(name=name, params=params)
+
+    async def execute(self, action: ParsedAction) -> Observation:
+        """Execute a parsed action via MCPClient.
+
+        Args:
+            action: ParsedAction to execute.
+
+        Returns:
+            Observation with result text, error status, and parsed results.
+        """
+        if action.name not in _TOOL_DEFS:
+            known = ", ".join(sorted(_TOOL_DEFS.keys()))
+            return Observation(
+                text=f"Unknown tool: {action.name}. Available tools: {known}",
+                is_error=True,
+            )
+
+        try:
+            result: ToolResult = await self._mcp_client.call_tool(
+                action.name, action.params
+            )
+        except asyncio.TimeoutError:
+            return Observation(
+                text="Tool call timeout",
+                is_error=True,
+            )
+        except Exception as e:
+            return Observation(
+                text=f"Tool call failed: {e}",
+                is_error=True,
+            )
+
+        parsed_results: List[RetrievalResult] = []
+        if action.name == "query_knowledge_hub" and not result.is_error:
+            parsed_results = self._extract_results(result.content)
+
+        truncated = self._truncate_content(result.content, max_chars=500)
+
+        return Observation(
+            text=truncated,
+            is_error=result.is_error,
+            results=parsed_results,
+        )
+
+    @staticmethod
+    def _parse_params(params_str: str) -> Dict[str, Any]:
+        """Parse key=value parameters from LLM action string."""
+        if not params_str.strip():
+            return {}
+
+        params: Dict[str, Any] = {}
+        pattern = r'(\w+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|(\d+))'
+        for match in re.finditer(pattern, params_str):
+            key = match.group(1)
+            str_val = match.group(2)
+            int_val = match.group(3)
+
+            if str_val is not None:
+                params[key] = str_val.replace('\\"', '"').replace("\\\\", "\\")
+            elif int_val is not None:
+                params[key] = int(int_val)
+
+        return params
+
+    @staticmethod
+    def _extract_results(content: str) -> List[RetrievalResult]:
+        """Extract RetrievalResult list from query_knowledge_hub response JSON."""
+        json_pattern = r'```json\s*(.*?)\s*```'
+        match = re.search(json_pattern, content, re.DOTALL)
+        if not match:
+            return []
+
+        try:
+            data = json.loads(match.group(1))
+            final_results = data.get("metadata", {}).get("final_results", [])
+
+            results: List[RetrievalResult] = []
+            for item in final_results:
+                results.append(RetrievalResult(
+                    chunk_id=item.get("chunk_id", ""),
+                    score=item.get("score", 0.0),
+                    text=item.get("text", ""),
+                    metadata={
+                        "source_path": item.get("source", ""),
+                        "title": item.get("title", ""),
+                    },
+                ))
+            return results
+        except (json.JSONDecodeError, KeyError):
+            return []
+
+    @staticmethod
+    def _truncate_content(text: str, max_chars: int = 500) -> str:
+        """Truncate text content to max characters at word boundary."""
+        if len(text) <= max_chars:
+            return text
+        truncated = text[:max_chars].rsplit(" ", 1)[0]
+        return truncated + "..."
