@@ -1,7 +1,16 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -m pytest tests/unit/agentic/test_react_loop.py -v)"
+      "Bash(python -m pytest tests/unit/agentic/test_react_loop.py -v)",
+      "Bash(bash \"C:\\\\Users\\\\34290\\\\.claude\\\\plugins\\\\cache\\\\superpowers-dev\\\\superpowers\\\\6.0.3\\\\skills\\\\subagent-driven-development\\\\scripts\\\\task-brief\" \"docs/superpowers/plans/2026-06-27-agentic-rag.md\" 7)",
+      "Bash(bash \"C:\\\\Users\\\\34290\\\\.claude\\\\plugins\\\\cache\\\\superpowers-dev\\\\superpowers\\\\6.0.3\\\\skills\\\\subagent-driven-development\\\\scripts\\\\task-brief\" \"docs/superpowers/plans/2026-06-27-agentic-rag.md\" 8)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('scripts/agentic_query.py', encoding='utf-8'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
+      "Bash(python -m pytest tests/integration/agentic/test_react_loop_integration.py -v -m \"not llm\")",
+      "Bash(pytest tests/unit/agentic/ -v)",
+      "Bash(pytest tests/unit/ -v -m \"not llm and not slow\")",
+      "Bash(pytest tests/unit/test_trace_context.py tests/unit/test_trace_service.py -v)",
+      "Bash(bash \"C:\\\\Users\\\\34290\\\\.claude\\\\plugins\\\\cache\\\\superpowers-dev\\\\superpowers\\\\6.0.3\\\\skills\\\\subagent-driven-development\\\\scripts\\\\review-package\" 8cf9422 HEAD)",
+      "Bash(pytest tests/unit/agentic/test_tool_registry.py -v)"
     ]
   }
 }
