@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+body {
+  background-color: #FFF5F7;
+  color: #4A3040;
+  font-family: 'Nunito', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+/* 自定义滚动条 */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #FFF5F7; }
+::-webkit-scrollbar-thumb { background: #FFB6C1; border-radius: 3px; }
+
+/* 选中颜色 */
+::selection { background: #FFB6C1; color: white; }
+
+/* 路由过渡动画 */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.25s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
