@@ -22,6 +22,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from src.api.routers.query import router as query_router
+app.include_router(query_router)
+
 
 @app.get("/api/health")
 async def health():
